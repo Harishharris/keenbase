@@ -8,14 +8,6 @@ import (
 	"github.com/ganigeorgiev/fexpr"
 )
 
-// filterToSQL parses a PocketBase-style filter expression and returns a
-// SQL WHERE clause fragment plus the ordered bind arguments.
-//
-// Examples:
-//
-//	"title = 'hello'"           →  `"title" = ?`          args: ["hello"]
-//	"count > 5 && active = true" →  `"count" > ? AND "active" = ?`  args: [5, true]
-//	"title ~ 'go'"              →  `"title" LIKE ?`        args: ["%go%"]
 func filterToSQL(expr string) (string, []any, error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
@@ -35,7 +27,6 @@ func filterToSQL(expr string) (string, []any, error) {
 	return sql, fb.args, nil
 }
 
-// filterBuilder walks an fexpr AST and accumulates SQL fragments + bind args.
 type filterBuilder struct {
 	args []any
 }
@@ -78,13 +69,12 @@ func (fb *filterBuilder) buildGroup(items []fexpr.ExprGroup) (string, error) {
 }
 
 func (fb *filterBuilder) buildExpr(expr fexpr.Expr) (string, error) {
-	// Left side is always a column identifier (quoted for safety).
+
 	if expr.Left.Type != fexpr.TokenIdentifier {
 		return "", fmt.Errorf("left operand must be a field name, got %q", expr.Left.Literal)
 	}
 	col := fmt.Sprintf("%q", expr.Left.Literal)
 
-	// Right side is a literal value turned into a bind argument.
 	val := tokenValue(expr.Right)
 	switch expr.Op {
 	case fexpr.SignEq:
@@ -135,8 +125,6 @@ func (fb *filterBuilder) buildExpr(expr fexpr.Expr) (string, error) {
 		fb.args = append(fb.args, s)
 		return fmt.Sprintf("%s NOT LIKE ?", col), nil
 
-	// "Any/at-least-one-of" variants — for simple scalar columns they
-	// behave identically to the non-? form.
 	case fexpr.SignAnyEq:
 		fb.args = append(fb.args, val)
 		return fmt.Sprintf("%s = ?", col), nil
@@ -182,11 +170,6 @@ func (fb *filterBuilder) buildExpr(expr fexpr.Expr) (string, error) {
 	}
 }
 
-// tokenValue converts an fexpr Token to a typed Go value suitable for use
-// as a SQL bind argument.
-//
-// fexpr represents true/false/null as TokenIdentifier with those literal
-// strings — there are no separate Bool or Null token types.
 func tokenValue(t fexpr.Token) any {
 	switch t.Type {
 	case fexpr.TokenText:

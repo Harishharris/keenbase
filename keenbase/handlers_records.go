@@ -7,19 +7,13 @@ import (
 	"strings"
 )
 
-// handleListRecords handles GET /api/collections/{name}/records
-//
-// Query params:
-//
-//	page      int     page number (default 1)
-//	perPage   int     records per page (default 30, max 500)
-//	sort      string  e.g. "-created,title"
-//	filter    string  e.g. "title ~ 'hello' && active = true"
-//	fields    string  comma-separated field names to include in the response
-//	skipTotal bool    skip COUNT query for faster responses
 func (sb *SimpleBase) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
+		return
+	}
+
+	if err := sb.checkRule(w, r, col, RuleList, nil); err != nil {
 		return
 	}
 
@@ -38,7 +32,6 @@ func (sb *SimpleBase) handleListRecords(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Optional field projection.
 	if fields := q.Get("fields"); fields != "" {
 		result.Items = projectRecords(result.Items, splitFields(fields))
 	}
@@ -46,7 +39,6 @@ func (sb *SimpleBase) handleListRecords(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleViewRecord handles GET /api/collections/{name}/records/{id}
 func (sb *SimpleBase) handleViewRecord(w http.ResponseWriter, r *http.Request) {
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
@@ -64,6 +56,10 @@ func (sb *SimpleBase) handleViewRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := sb.checkRule(w, r, col, RuleView, rec); err != nil {
+		return
+	}
+
 	if fields := r.URL.Query().Get("fields"); fields != "" {
 		rec = projectRecord(rec, splitFields(fields))
 	}
@@ -71,17 +67,29 @@ func (sb *SimpleBase) handleViewRecord(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
-// handleCreateRecord handles POST /api/collections/{name}/records
 func (sb *SimpleBase) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
 		return
 	}
-
-	var data map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request body.")
+	if col.IsView() {
+		writeError(w, http.StatusMethodNotAllowed, "View collections are read-only.")
 		return
+	}
+
+	if err := sb.checkRule(w, r, col, RuleCreate, nil); err != nil {
+		return
+	}
+
+	data, err := sb.parseRecordBody(r, col)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if provisional, ok := data["__id"].(string); ok {
+		delete(data, "__id")
+		data["id"] = provisional
 	}
 
 	rec, err := sb.records.Create(col, data)
@@ -93,20 +101,41 @@ func (sb *SimpleBase) handleCreateRecord(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, rec)
 }
 
-// handleUpdateRecord handles PATCH /api/collections/{name}/records/{id}
 func (sb *SimpleBase) handleUpdateRecord(w http.ResponseWriter, r *http.Request) {
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
 		return
 	}
+	if col.IsView() {
+		writeError(w, http.StatusMethodNotAllowed, "View collections are read-only.")
+		return
+	}
 
 	id := r.PathValue("id")
 
-	var data map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request body.")
+	existing, err := sb.records.GetByID(col, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to fetch record.")
 		return
 	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, "The requested resource wasn't found.")
+		return
+	}
+
+	if err := sb.checkRule(w, r, col, RuleUpdate, existing); err != nil {
+		return
+	}
+
+	data, err := sb.parseRecordBody(r, col)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	delete(data, "__id")
+
+	oldFiles := collectOldFileNames(col, existing, data)
 
 	rec, err := sb.records.Update(col, id, data)
 	if err != nil {
@@ -118,19 +147,27 @@ func (sb *SimpleBase) handleUpdateRecord(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if sb.files != nil {
+		for _, fname := range oldFiles {
+			sb.files.DeleteFile(col.ID, id, fname)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, rec)
 }
 
-// handleDeleteRecord handles DELETE /api/collections/{name}/records/{id}
 func (sb *SimpleBase) handleDeleteRecord(w http.ResponseWriter, r *http.Request) {
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
 		return
 	}
+	if col.IsView() {
+		writeError(w, http.StatusMethodNotAllowed, "View collections are read-only.")
+		return
+	}
 
 	id := r.PathValue("id")
 
-	// Verify the record exists before deleting.
 	rec, err := sb.records.GetByID(col, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to fetch record.")
@@ -141,17 +178,22 @@ func (sb *SimpleBase) handleDeleteRecord(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := sb.checkRule(w, r, col, RuleDelete, rec); err != nil {
+		return
+	}
+
 	if err := sb.records.Delete(col, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to delete record.")
 		return
 	}
 
+	if sb.files != nil {
+		sb.files.DeleteRecordFiles(col.ID, id)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ---------------------------------------------------------------- helpers
-
-// queryInt parses an integer query param, returning fallback on missing/invalid.
 func queryInt(s string, fallback int) int {
 	if s == "" {
 		return fallback
@@ -163,7 +205,6 @@ func queryInt(s string, fallback int) int {
 	return n
 }
 
-// splitFields splits a comma-separated fields string into a set for O(1) lookup.
 func splitFields(fields string) map[string]bool {
 	set := map[string]bool{}
 	for _, f := range strings.Split(fields, ",") {
@@ -175,9 +216,6 @@ func splitFields(fields string) map[string]bool {
 	return set
 }
 
-// projectRecord returns a copy of the record with only the requested fields.
-// System fields (id, collectionId, collectionName, created, updated) are
-// always included regardless of the fields parameter.
 func projectRecord(rec *Record, fields map[string]bool) *Record {
 	projected := &Record{
 		id:             rec.id,
@@ -195,11 +233,36 @@ func projectRecord(rec *Record, fields map[string]bool) *Record {
 	return projected
 }
 
-// projectRecords applies projectRecord to every record in a slice.
 func projectRecords(records []*Record, fields map[string]bool) []*Record {
 	out := make([]*Record, len(records))
 	for i, r := range records {
 		out[i] = projectRecord(r, fields)
 	}
 	return out
+}
+
+func collectOldFileNames(col *Collection, existing *Record, patch map[string]any) []string {
+	var old []string
+	for _, f := range col.Fields {
+		if f.Type != FieldTypeFile {
+			continue
+		}
+		if _, replacing := patch[f.Name]; !replacing {
+			continue // field not in patch — nothing to replace
+		}
+		current := existing.GetString(f.Name)
+		if current == "" {
+			continue
+		}
+		// Single filename or JSON array of filenames.
+		if current[0] == '[' {
+			var names []string
+			if err := json.Unmarshal([]byte(current), &names); err == nil {
+				old = append(old, names...)
+				continue
+			}
+		}
+		old = append(old, current)
+	}
+	return old
 }

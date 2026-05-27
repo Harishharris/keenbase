@@ -9,8 +9,6 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
 
-// openDB opens (or creates) the SQLite database file inside dataDir,
-// applies recommended pragmas, and returns the connection pool.
 func openDB(dataDir string) (*sql.DB, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir %q: %w", dataDir, err)
@@ -22,8 +20,6 @@ func openDB(dataDir string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open sqlite at %q: %w", dbPath, err)
 	}
 
-	// SQLite works best with a single writer connection.
-	// WAL mode allows concurrent readers alongside that writer.
 	db.SetMaxOpenConns(1)
 
 	pragmas := []string{

@@ -11,15 +11,10 @@ import (
 
 var reCollectionName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 
-// systemCollections lists the built-in collection IDs that cannot be deleted
-// or have their type changed by users.
 var systemCollections = map[string]bool{
 	SuperusersCollectionID: true,
 }
 
-// CollectionStore handles all persistence for collection definitions.
-// It manages both the metadata rows in _collections and the actual SQLite
-// tables that back each collection's records.
 type CollectionStore struct {
 	db *sql.DB
 }
@@ -27,8 +22,6 @@ type CollectionStore struct {
 func newCollectionStore(db *sql.DB) *CollectionStore {
 	return &CollectionStore{db: db}
 }
-
-// ---------------------------------------------------------------- validation
 
 func validateCollection(c *Collection) error {
 	if strings.TrimSpace(c.Name) == "" {
@@ -49,7 +42,6 @@ func validateCollection(c *Collection) error {
 		return fmt.Errorf("viewQuery is required for view collections")
 	}
 
-	// Validate fields.
 	reserved := map[string]bool{"id": true, "created": true, "updated": true}
 	if c.Type == CollectionTypeAuth {
 		for _, n := range []string{"email", "emailVisibility", "verified", "password", "tokenKey"} {
@@ -86,9 +78,6 @@ func isValidFieldType(ft FieldType) bool {
 	return false
 }
 
-// ---------------------------------------------------------------- DDL helpers
-
-// fieldSQLType maps a FieldType to the appropriate SQLite column affinity.
 func fieldSQLType(ft FieldType) string {
 	switch ft {
 	case FieldTypeNumber:
@@ -100,7 +89,6 @@ func fieldSQLType(ft FieldType) string {
 	}
 }
 
-// fieldSQLDefault returns the DEFAULT expression for a field column.
 func fieldSQLDefault(ft FieldType) string {
 	switch ft {
 	case FieldTypeNumber:
@@ -114,7 +102,6 @@ func fieldSQLDefault(ft FieldType) string {
 	}
 }
 
-// createTable issues a CREATE TABLE statement for the collection's data table.
 func (cs *CollectionStore) createTable(tx *sql.Tx, c *Collection) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %q (\n", c.Name)
@@ -146,7 +133,6 @@ func (cs *CollectionStore) createTable(tx *sql.Tx, c *Collection) error {
 	return err
 }
 
-// addColumn appends a new column to an existing collection table.
 func (cs *CollectionStore) addColumn(tx *sql.Tx, tableName string, f Field) error {
 	sqlType := fieldSQLType(f.Type)
 	def := fieldSQLDefault(f.Type)
@@ -160,15 +146,11 @@ func (cs *CollectionStore) addColumn(tx *sql.Tx, tableName string, f Field) erro
 	return err
 }
 
-// dropTable drops a collection's data table.
 func (cs *CollectionStore) dropTable(tx *sql.Tx, tableName string) error {
 	_, err := tx.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %q", tableName))
 	return err
 }
 
-// ---------------------------------------------------------------- CRUD
-
-// List returns all collections ordered by name.
 func (cs *CollectionStore) List() ([]*Collection, error) {
 	rows, err := cs.db.Query(`
 		SELECT id, name, type, fields,
@@ -196,7 +178,6 @@ func (cs *CollectionStore) List() ([]*Collection, error) {
 	return cols, rows.Err()
 }
 
-// GetByName returns the collection with the given name, or nil if not found.
 func (cs *CollectionStore) GetByName(name string) (*Collection, error) {
 	row := cs.db.QueryRow(`
 		SELECT id, name, type, fields,
@@ -211,7 +192,6 @@ func (cs *CollectionStore) GetByName(name string) (*Collection, error) {
 	return c, err
 }
 
-// GetByID returns the collection with the given ID, or nil if not found.
 func (cs *CollectionStore) GetByID(id string) (*Collection, error) {
 	row := cs.db.QueryRow(`
 		SELECT id, name, type, fields,
@@ -226,7 +206,6 @@ func (cs *CollectionStore) GetByID(id string) (*Collection, error) {
 	return c, err
 }
 
-// Create validates and persists a new collection, then creates its data table.
 func (cs *CollectionStore) Create(c *Collection) error {
 	if err := validateCollection(c); err != nil {
 		return err
@@ -289,7 +268,6 @@ func (cs *CollectionStore) Create(c *Collection) error {
 		return fmt.Errorf("insert _collections: %w", err)
 	}
 
-	// View collections use a SQL query, not a dedicated table.
 	if c.Type != CollectionTypeView {
 		if err := cs.createTable(tx, c); err != nil {
 			return fmt.Errorf("create table %q: %w", c.Name, err)
@@ -299,15 +277,6 @@ func (cs *CollectionStore) Create(c *Collection) error {
 	return tx.Commit()
 }
 
-// Update applies changes to an existing collection.
-//
-// Supported changes:
-//   - Rename the collection (also renames the underlying table)
-//   - Add new fields (issues ALTER TABLE ADD COLUMN for each)
-//   - Update field metadata / rules / auth options
-//
-// Not supported in this version: removing or renaming individual fields.
-// The collection type cannot be changed after creation.
 func (cs *CollectionStore) Update(c *Collection) error {
 	old, err := cs.GetByID(c.ID)
 	if err != nil {
@@ -324,7 +293,6 @@ func (cs *CollectionStore) Update(c *Collection) error {
 		return err
 	}
 
-	// Check name uniqueness when renaming.
 	if c.Name != old.Name {
 		existing, err := cs.GetByName(c.Name)
 		if err != nil {
@@ -335,7 +303,6 @@ func (cs *CollectionStore) Update(c *Collection) error {
 		}
 	}
 
-	// Assign IDs to any newly added fields.
 	for i := range c.Fields {
 		if c.Fields[i].ID == "" {
 			c.Fields[i].ID = newID()
@@ -408,8 +375,6 @@ func (cs *CollectionStore) Update(c *Collection) error {
 	return tx.Commit()
 }
 
-// Delete removes a collection's metadata row and drops its data table.
-// System collections (e.g. _superusers) cannot be deleted.
 func (cs *CollectionStore) Delete(c *Collection) error {
 	if systemCollections[c.ID] {
 		return fmt.Errorf("cannot delete system collection %q", c.Name)
@@ -434,11 +399,6 @@ func (cs *CollectionStore) Delete(c *Collection) error {
 	return tx.Commit()
 }
 
-// ---------------------------------------------------------------- scan helpers
-
-// scanCollection reads a collection row using the provided Scan function.
-// It works with both *sql.Row.Scan and *sql.Rows.Scan because both accept
-// the same variadic-pointer signature.
 func scanCollection(scan func(...any) error) (*Collection, error) {
 	var (
 		c            Collection
@@ -504,10 +464,6 @@ func scanCollection(scan func(...any) error) (*Collection, error) {
 	return &c, nil
 }
 
-// ---------------------------------------------------------------- small utils
-
-// ptrToNull converts a *string rule into a sql.NullString for storage.
-// nil → NULL (locked), &"" → valid empty string (public), &"expr" → valid expression.
 func ptrToNull(s *string) sql.NullString {
 	if s == nil {
 		return sql.NullString{Valid: false}

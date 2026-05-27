@@ -4,33 +4,29 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"time"
 )
 
-// SimpleBase is the top-level application instance.
-// It owns the database connection and (soon) the HTTP server.
 type SimpleBase struct {
 	config      Config
 	db          *sql.DB
 	collections *CollectionStore
 	records     *RecordStore
+	auth        *AuthStore
+	files       *FileStore
+	Cron        *Cron
 }
 
-// Config holds the startup configuration for a SimpleBase instance.
 type Config struct {
-	// Port is the TCP port the HTTP server will listen on. Defaults to 8090.
 	Port int
-	// DataDir is the directory where the SQLite database and uploaded files
-	// are stored. Defaults to "./pb_data".
+
 	DataDir string
 }
 
-// New creates a SimpleBase instance with sensible defaults.
 func New() *SimpleBase {
 	return WithConfig(Config{})
 }
 
-// WithConfig creates a SimpleBase instance using the provided Config,
-// filling in any zero values with their defaults.
 func WithConfig(config Config) *SimpleBase {
 	if config.Port == 0 {
 		config.Port = 8090
@@ -41,31 +37,70 @@ func WithConfig(config Config) *SimpleBase {
 	return &SimpleBase{config: config}
 }
 
-// Start initialises the database and launches the HTTP server.
-// It blocks until the server shuts down or an error occurs.
 func (sb *SimpleBase) Start() error {
-	// 1. Open the SQLite database (creates the file if it doesn't exist).
+	if err := sb.init(); err != nil {
+		return err
+	}
+	sb.Cron.Add("example-job", "* * * * *", func() {
+		log.Println("Job-1 logs coming here")
+	})
+	sb.Cron.Add("example-job-2", "* * * * *", func() {
+		log.Println("Job-2 logs coming here")
+	})
+	sb.Cron.SetInterval(2 * time.Second)
+	log.Printf("keenbase started — data dir: %s, port: %d", sb.config.DataDir, sb.config.Port)
+	return sb.serve()
+}
+
+func (sb *SimpleBase) init() error {
+	if sb.db != nil {
+		return nil
+	}
+
 	db, err := openDB(sb.config.DataDir)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	sb.db = db
 
-	// 2. Create system tables and seed built-in data on first run.
 	if err := bootstrap(db); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
 	sb.collections = newCollectionStore(db)
 	sb.records = newRecordStore(db)
-
-	log.Printf("SimpleBase started — data dir: %s, port: %d", sb.config.DataDir, sb.config.Port)
-
-	return sb.serve()
+	sb.auth = newAuthStore(db, sb.records)
+	sb.files = newFileStore(sb.config.DataDir)
+	sb.Cron = NewCron()
+	return nil
 }
 
-// DB returns the underlying database connection.
-// Useful for custom queries; prefer the higher-level APIs where possible.
+func (sb *SimpleBase) CreateSuperuser(email, password string) error {
+	if err := sb.init(); err != nil {
+		return err
+	}
+
+	col := &Collection{
+		ID:   SuperusersCollectionID,
+		Name: "_superusers",
+		Type: CollectionTypeAuth,
+		AuthOptions: &AuthOptions{
+			PasswordAuth: PasswordAuthOptions{
+				Enabled:        true,
+				IdentityFields: []string{"email"},
+			},
+		},
+	}
+
+	_, err := sb.auth.CreateAuthRecord(col, email, password, nil)
+	if err != nil {
+		return fmt.Errorf("create superuser: %w", err)
+	}
+
+	log.Printf("superuser created: %s", email)
+	return nil
+}
+
 func (sb *SimpleBase) DB() *sql.DB {
 	return sb.db
 }

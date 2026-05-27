@@ -9,8 +9,6 @@ import (
 const idAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 const idLength = 15
 
-// newID returns a cryptographically random 15-character lowercase alphanumeric
-// string, matching the ID format used by PocketBase.
 func newID() string {
 	alphabetLen := big.NewInt(int64(len(idAlphabet)))
 	buf := make([]byte, idLength)

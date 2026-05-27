@@ -5,10 +5,13 @@ import (
 	"net/http"
 )
 
-// handleListCollections returns all collections.
-//
-//	GET /api/collections
 func (sb *SimpleBase) handleListCollections(w http.ResponseWriter, r *http.Request) {
+	auth := authFromContext(r.Context())
+	if !auth.IsSuperuser {
+		writeError(w, http.StatusForbidden, "Only superusers can perform this action.")
+		return
+	}
+
 	cols, err := sb.collections.List()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to fetch collections.")
@@ -17,10 +20,13 @@ func (sb *SimpleBase) handleListCollections(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, cols)
 }
 
-// handleViewCollection returns a single collection by name or ID.
-//
-//	GET /api/collections/{name}
 func (sb *SimpleBase) handleViewCollection(w http.ResponseWriter, r *http.Request) {
+	auth := authFromContext(r.Context())
+	if !auth.IsSuperuser {
+		writeError(w, http.StatusForbidden, "Only superusers can perform this action.")
+		return
+	}
+
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
 		return
@@ -28,10 +34,12 @@ func (sb *SimpleBase) handleViewCollection(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, col)
 }
 
-// handleCreateCollection creates a new collection and its underlying table.
-//
-//	POST /api/collections
 func (sb *SimpleBase) handleCreateCollection(w http.ResponseWriter, r *http.Request) {
+	auth := authFromContext(r.Context())
+	if !auth.IsSuperuser {
+		writeError(w, http.StatusForbidden, "Only superusers can perform this action.")
+		return
+	}
 	var body struct {
 		Name        string         `json:"name"`
 		Type        CollectionType `json:"type"`
@@ -82,27 +90,24 @@ func (sb *SimpleBase) handleCreateCollection(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, col)
 }
 
-// handleUpdateCollection applies a partial update to an existing collection.
-//
-//	PATCH /api/collections/{name}
-//
-// Only the keys present in the request body are applied. This is handled by
-// decoding into a raw map first, then selectively patching the collection.
 func (sb *SimpleBase) handleUpdateCollection(w http.ResponseWriter, r *http.Request) {
+	auth := authFromContext(r.Context())
+	if !auth.IsSuperuser {
+		writeError(w, http.StatusForbidden, "Only superusers can perform this action.")
+		return
+	}
+
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
 		return
 	}
 
-	// Decode into a raw map so we can distinguish "key not sent" from
-	// "key explicitly set to null" — important for *string rule fields.
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body.")
 		return
 	}
 
-	// Helper: unmarshal a raw value into dst if the key is present.
 	patch := func(key string, dst any) {
 		if v, ok := raw[key]; ok {
 			_ = json.Unmarshal(v, dst)
@@ -132,10 +137,13 @@ func (sb *SimpleBase) handleUpdateCollection(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, col)
 }
 
-// handleDeleteCollection deletes a collection and drops its underlying table.
-//
-//	DELETE /api/collections/{name}
 func (sb *SimpleBase) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
+	auth := authFromContext(r.Context())
+	if !auth.IsSuperuser {
+		writeError(w, http.StatusForbidden, "Only superusers can perform this action.")
+		return
+	}
+
 	col, ok := sb.resolveCollection(w, r)
 	if !ok {
 		return
@@ -149,8 +157,6 @@ func (sb *SimpleBase) handleDeleteCollection(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resolveCollection looks up a collection by the {name} path value,
-// writes a 404 on miss, and returns (collection, true) on hit.
 func (sb *SimpleBase) resolveCollection(w http.ResponseWriter, r *http.Request) (*Collection, bool) {
 	name := r.PathValue("name")
 	col, err := sb.collections.GetByName(name)
