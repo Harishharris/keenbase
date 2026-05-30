@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type Job struct {
 }
 
 type Cron struct {
+	mu         sync.Mutex
 	startTime  *time.Timer
 	ticker     *time.Ticker
 	duration   time.Duration
@@ -31,6 +33,8 @@ func NewCron() *Cron {
 }
 
 func (c *Cron) Add(name string, schedule string, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	job := &Job{
 		ID:       randomBase64(16),
 		Name:     name,
@@ -41,10 +45,14 @@ func (c *Cron) Add(name string, schedule string, f func()) {
 }
 
 func (c *Cron) SetInterval(duration time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.duration = duration
 }
 
 func (c *Cron) Cron() []Job {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	jobs := []Job{}
 
 	for _, job := range c.jobs {
